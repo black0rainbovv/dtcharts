@@ -1,0 +1,489 @@
+#include "mainwindow.h"
+#include "ui_mainwindow.h"
+
+QList<QSpinBox*> Calib_list;
+QList<QSpinBox*> Rotate_list;
+QList<QSpinBox*> X_list;
+QList<QSpinBox*> Y_list;
+QList<QLineEdit*> Max_list;
+
+QPoint p1, p2, pc;
+int channels_count = 0;
+QList<QColor> channel_color;
+
+MainWindow::MainWindow(QWidget *parent) :
+    QMainWindow(parent),
+    ui(new Ui::MainWindow)
+{
+    ui->setupUi(this);
+    ui->label_6->setVisible(false);
+    ui->maxlineEdit_4->setVisible(false);
+    ui->spinBox_4->setVisible(false);
+    ui->spinBox_r4->setVisible(false);
+    ui->spinBox_x4->setVisible(false);
+    ui->spinBox_y4->setVisible(false);
+    ui->fadc3lineEdit_4->setVisible(false);
+    ui->fadc2lineEdit_4->setVisible(false);
+    ui->fadc0lineEdit_4->setVisible(false);
+    ui->label_12->setVisible(false);
+    channel_color << QColor("#2424ff") << QColor("#48ff48") << QColor("#ffc312")
+                   << QColor("#9f00c5") << QColor("#e43a00");
+    Calib_list << ui->spinBox_0 << ui->spinBox_1 << ui->spinBox_2
+           << ui->spinBox_3 << ui->spinBox_4;
+    Rotate_list << ui->spinBox_r0 << ui->spinBox_r1 << ui->spinBox_r2
+                << ui->spinBox_r3 << ui->spinBox_r4;
+    X_list << ui->spinBox_x0 << ui->spinBox_x1 << ui->spinBox_x2
+           << ui->spinBox_x3 << ui->spinBox_x4;
+    Y_list << ui->spinBox_y0 << ui->spinBox_y1 << ui->spinBox_y2
+           << ui->spinBox_y3 << ui->spinBox_y4;
+    Max_list << ui->maxlineEdit_0 << ui->maxlineEdit_1 << ui->maxlineEdit_2
+             << ui->maxlineEdit_3 << ui->maxlineEdit_4;
+    fadc3_list << ui->fadc3lineEdit_0 << ui->fadc3lineEdit_1 << ui->fadc3lineEdit_2
+               << ui->fadc3lineEdit_3 << ui->fadc3lineEdit_4;
+    fadc2_list << ui->fadc2lineEdit_0 << ui->fadc2lineEdit_1 << ui->fadc2lineEdit_2
+               << ui->fadc2lineEdit_3 << ui->fadc2lineEdit_4;
+    fadc0_list << ui->fadc0lineEdit_0 << ui->fadc0lineEdit_1 << ui->fadc0lineEdit_2
+               << ui->fadc0lineEdit_3 << ui->fadc0lineEdit_4;
+
+    rubberBand = 0;
+    m3pressed = false;
+    tconnect = new QTimer;
+    DTconnected = false;
+    isScaled = false;
+
+    SetPlot();
+
+    Diagnostic();
+    tconnect->start(1000);
+
+    QObject::connect(tconnect, SIGNAL(timeout()), this, SLOT(CheckConnection()));
+
+    QObject::connect(ui->plotwidget, SIGNAL(mousePress(QMouseEvent*)), this, SLOT(mousePress(QMouseEvent*)));
+    QObject::connect(ui->plotwidget, SIGNAL(mouseMove(QMouseEvent*)), this, SLOT(mouseMove(QMouseEvent*)));
+    QObject::connect(ui->plotwidget, SIGNAL(mouseRelease(QMouseEvent*)), this, SLOT(mouseRelease(QMouseEvent*)));
+}
+
+MainWindow::~MainWindow()
+{
+    delete ui;
+}
+
+void MainWindow::Diagnostic()
+{
+    usb = new CyDev(NULL);
+    usb->Open(0);
+    if(!usb->IsOpen())
+    {
+        //QMessageBox::information(this, tr("Warning"), tr("Устройство DT не подключено"));
+        this->setWindowTitle("ControllerCalib - Not Connected");
+        DTconnected = false;
+    }
+    else
+    {
+        DTSN = QString::fromUtf16((ushort*)usb->SerNum);
+        this->setWindowTitle("ControllerCalib - "+DTSN);
+        Optic_uC = new CANChannels(usb,2);
+        Temp_uC = new CANChannels(usb,3);
+        Motor_uC = new CANChannels(usb,4);
+        Disp_uC = new CANChannels(usb,5);
+
+        QString outs;
+        if(USBCy_RW("GMP 4", outs, usb, Motor_uC))
+        {
+            if(outs.split(" ")[1] == "-1")
+            {
+                channels_count = 4;
+            }
+            else
+            {
+                channels_count = 5;
+                ui->label_6->setVisible(true);
+                ui->maxlineEdit_4->setVisible(true);
+                ui->spinBox_4->setVisible(true);
+                ui->spinBox_r4->setVisible(true);
+                ui->spinBox_x4->setVisible(true);
+                ui->spinBox_y4->setVisible(true);
+                ui->fadc3lineEdit_4->setVisible(true);
+                ui->fadc2lineEdit_4->setVisible(true);
+                ui->fadc0lineEdit_4->setVisible(true);
+                ui->label_12->setVisible(true);
+            }
+        }
+        DTconnected = true;
+        ReadFromDevice();
+    }
+}
+
+void MainWindow::CheckConnection()
+{
+    if(DTconnected)
+    {
+        QString outs;
+        if(!USBCy_RW("XGS", outs, usb, Temp_uC))
+        {
+            DTconnected = false;
+        }
+    }
+    else
+    {
+        Diagnostic();
+    }
+}
+
+void MainWindow::ReadFromDevice() // Чтение данных с устройства
+{
+    if(tconnect->isActive()) tconnect->stop();
+    MySplashScreen m;
+    m.setEnabled(false);
+    m.show();
+    QEventLoop loop;
+    ReadDataThread *t = new ReadDataThread();
+    QObject::connect(t, SIGNAL(finished()), &loop, SLOT(quit()));
+    QObject::connect(t, SIGNAL(finished()), tconnect, SLOT(start()));
+    QObject::connect(t, SIGNAL(SendData(QStringList,QStringList,QStringList,QStringList)),SLOT(GetData(QStringList,QStringList,QStringList,QStringList)));
+    QObject::connect(this, SIGNAL(SendChannelsCount(int, CyDev*, CANChannels*, CANChannels*)), t, SLOT(GetChannelsCount(int, CyDev*, CANChannels*, CANChannels*)));
+    emit SendChannelsCount(channels_count, usb, Optic_uC, Motor_uC);
+    t->start();
+    loop.exec();
+    m.hide();
+}
+
+void MainWindow::GetData(QStringList Calib, QStringList X, QStringList Y, QStringList Rotate)
+{
+    for(int i=0; i<channels_count; i++)
+    {
+        Max_list[i]->setText(Calib[i]);
+        //Calib_list[i]->setMaximum(Calib[i].toInt()); ??
+        Calib_list[i]->setValue(Calib[i].toInt());
+        X_list[i]->setValue(X[i].toInt());
+        Y_list[i]->setValue(Y[i].toInt());
+        Rotate_list[i]->setValue(Rotate[i].toInt());
+    }
+}
+
+void MainWindow::on_pushButton_clicked() // Установка токов, кнопка Изменить
+{
+    if(DTconnected)
+    {
+        QString outs;
+        for(int i=0; i<channels_count; i++)
+        {
+            USBCy_RW("FCSET "+QString::number(i)+" "+QString::number(i)+" "+
+                     QString::number(i)+" "+QString::number(Calib_list[i]->value()), outs, usb, Optic_uC);
+            QThread::msleep(60);
+        }
+    }
+}
+
+void MainWindow::on_pushButton_2_clicked() // Установка токов, кнопка Запомнить
+{
+    if(DTconnected)
+    {
+        QString outs;
+        USBCy_RW("FPSAVE", outs, usb, Optic_uC);
+        QThread::msleep(60);
+        for(int i=0; i<channels_count; i++)
+        {
+            USBCy_RW("FCGET "+QString::number(i), outs, usb, Optic_uC);
+            Max_list[i]->setText(outs.split(" ")[2]);
+            QThread::msleep(60);
+        }
+    }
+}
+
+void MainWindow::on_pushButton_5_clicked() // Смещение зоны оцифровки, кнопка Изменить
+{
+    if(DTconnected)
+    {
+        QString outs;
+        for(int i=0; i<channels_count; i++)
+        {
+            USBCy_RW("FCRXY "+QString::number(i)+" "+QString::number(X_list[i]->value())+
+                     " "+QString::number(Y_list[i]->value()), outs, usb, Optic_uC);
+            QThread::msleep(60);
+            USBCy_RW("SMP "+QString::number(i)+" "+QString::number(Rotate_list[i]->value()), outs, usb, Optic_uC);
+            QThread::msleep(60);
+        }
+    }
+}
+
+void MainWindow::on_pushButton_4_clicked() // Смещение зоны оцифровки, кнопка Запомнить
+{
+    if(DTconnected)
+    {
+        QString outs;
+        USBCy_RW("FPSAVE", outs, usb, Optic_uC);
+        QThread::msleep(60);
+        USBCy_RW("STMP", outs, usb, Motor_uC);
+        QThread::msleep(60);
+    }
+}
+
+void MainWindow::on_pushButton_3_clicked() // Измерение FADC
+{
+    if(DTconnected)
+    {
+        if(tconnect->isActive()) tconnect->stop();
+        QEventLoop loop;
+        OpticMeasureThread *o = new OpticMeasureThread();
+        QObject::connect(o, SIGNAL(finished()), &loop, SLOT(quit()));
+        QObject::connect(o,SIGNAL(finished()), tconnect, SLOT(start()));
+        QObject::connect(o, SIGNAL(LightChanged(int)), SLOT(ChangeLightColor(int)));
+        QObject::connect(this, SIGNAL(SendMeasureData(int, CyDev*, CANChannels*, CANChannels*)), o,
+                         SLOT(GetMeasureData(int, CyDev*, CANChannels*, CANChannels*)));
+        QObject::connect(o, SIGNAL(SendMeasured(int, QStringList)), this, SLOT(GetMeasured(int, QStringList)));
+        emit SendMeasureData(channels_count, usb, Optic_uC, Motor_uC);
+        o->start();
+        loop.exec();
+    }
+}
+
+void MainWindow::ChangeLightColor(int c)
+{
+    fadc3_list[c]->clear();
+    fadc2_list[c]->clear();
+    fadc0_list[c]->clear();
+    QPalette palette;
+    palette.setColor(QPalette::Base, channel_color[c]);
+    fadc3_list[c]->setPalette(palette);
+    fadc2_list[c]->setPalette(palette);
+    fadc0_list[c]->setPalette(palette);
+}
+
+void MainWindow::GetMeasured(int c, QStringList fadc_list)
+{
+    QPalette whitepalette;
+    whitepalette.setColor(QPalette::Base, Qt::white);
+    fadc3_list[c]->setPalette(whitepalette);
+    fadc3_list[c]->setText(fadc_list[0]);
+    fadc2_list[c]->setPalette(whitepalette);
+    fadc2_list[c]->setText(fadc_list[1]);
+    fadc0_list[c]->setPalette(whitepalette);
+    fadc0_list[c]->setText(fadc_list[2]);
+}
+
+void MainWindow::SetPlot()
+{
+    //ui->plotwidget->plotLayout()->clear();
+    ui->plotwidget->xAxis->setLabel("секунды");
+    ui->plotwidget->yAxis->setRange(0, 100);
+    ui->plotwidget->axisRect()->setRangeZoom(Qt::Horizontal);
+    ui->plotwidget->yAxis->setLabel("°C");
+    ui->plotwidget->setBackground(QColor(Qt::gray));
+
+    ui->plotwidget->yAxis2->setVisible(true);
+    ui->plotwidget->yAxis2->setRange(0, 255);
+
+//    QCPAxisRect *CurAxis = new QCPAxisRect(ui->plotwidget, false);
+//    ui->plotwidget->plotLayout()->addElement(0, 0, CurAxis);
+//    CurAxis->setMinimumSize(300,300);
+//    CurAxis->addAxes(QCPAxis::atBottom | QCPAxis::atLeft);
+//    CurAxis->setupFullAxesBox();
+//    CurAxis->axis(QCPAxis::atLeft)->setRange(0, 255);
+
+    QPen p;
+    p.setColor(QColor(Qt::red));
+    p.setWidth(2);
+    ui->plotwidget->addGraph();
+    ui->plotwidget->graph(0)->setPen(p);
+    ui->plotwidget->graph(0)->setAntialiasedFill(false);
+    ui->plotwidget->graph(0)->setLineStyle(QCPGraph::lsLine);
+
+    ui->plotwidget->addGraph();
+    p.setColor(QColor(Qt::black));
+    ui->plotwidget->graph(1)->setPen(p);
+    ui->plotwidget->graph(1)->setAntialiasedFill(false);
+    ui->plotwidget->graph(1)->setLineStyle(QCPGraph::lsLine);
+
+    ui->plotwidget->addGraph();
+    p.setColor(QColor(Qt::yellow));
+    ui->plotwidget->graph(2)->setPen(p);
+    ui->plotwidget->graph(2)->setAntialiasedFill(false);
+    ui->plotwidget->graph(2)->setLineStyle(QCPGraph::lsLine);
+
+    ui->plotwidget->addGraph();
+    p.setColor(QColor(Qt::cyan));
+    ui->plotwidget->graph(3)->setPen(p);
+    ui->plotwidget->graph(3)->setAntialiasedFill(false);
+    ui->plotwidget->graph(3)->setLineStyle(QCPGraph::lsLine);
+
+    ui->plotwidget->addGraph();
+    p.setColor(QColor(Qt::blue));
+    ui->plotwidget->graph(4)->setPen(p);
+    ui->plotwidget->graph(4)->setAntialiasedFill(false);
+    ui->plotwidget->graph(4)->setLineStyle(QCPGraph::lsLine);
+
+    ui->plotwidget->addGraph();
+    p.setColor(QColor(Qt::magenta));
+    ui->plotwidget->graph(5)->setPen(p);
+    ui->plotwidget->graph(5)->setAntialiasedFill(false);
+    ui->plotwidget->graph(5)->setLineStyle(QCPGraph::lsLine);
+
+    ui->plotwidget->addGraph(); // Заданная
+    p.setColor(QColor(Qt::magenta));
+    ui->plotwidget->graph(6)->setPen(p);
+    ui->plotwidget->graph(6)->setAntialiasedFill(false);
+    ui->plotwidget->graph(6)->setLineStyle(QCPGraph::lsLine);
+
+    ui->plotwidget->addGraph(ui->plotwidget->xAxis, ui->plotwidget->yAxis2);
+    ui->plotwidget->graph(7)->setPen(p);
+    ui->plotwidget->graph(7)->setAntialiasedFill(false);
+    ui->plotwidget->graph(7)->setLineStyle(QCPGraph::lsLine);
+
+    ui->plotwidget->addGraph(ui->plotwidget->xAxis, ui->plotwidget->yAxis2);
+    p.setColor(QColor(Qt::black));
+    ui->plotwidget->graph(8)->setPen(p);
+    ui->plotwidget->graph(8)->setAntialiasedFill(false);
+    ui->plotwidget->graph(8)->setLineStyle(QCPGraph::lsLine);
+
+    ui->plotwidget->addGraph(ui->plotwidget->xAxis, ui->plotwidget->yAxis2);
+    p.setColor(QColor(Qt::yellow));
+    ui->plotwidget->graph(9)->setPen(p);
+    ui->plotwidget->graph(9)->setAntialiasedFill(false);
+    ui->plotwidget->graph(9)->setLineStyle(QCPGraph::lsLine);
+
+    ui->plotwidget->addGraph(ui->plotwidget->xAxis, ui->plotwidget->yAxis2);
+    p.setColor(QColor(Qt::cyan));
+    ui->plotwidget->graph(10)->setPen(p);
+    ui->plotwidget->graph(10)->setAntialiasedFill(false);
+    ui->plotwidget->graph(10)->setLineStyle(QCPGraph::lsLine);
+
+    ui->plotwidget->addGraph(ui->plotwidget->xAxis, ui->plotwidget->yAxis2);
+    p.setColor(QColor(Qt::blue));
+    ui->plotwidget->graph(11)->setPen(p);
+    ui->plotwidget->graph(11)->setAntialiasedFill(false);
+    ui->plotwidget->graph(11)->setLineStyle(QCPGraph::lsLine);
+
+    ui->plotwidget->addGraph(ui->plotwidget->xAxis, ui->plotwidget->yAxis2);
+    p.setColor(QColor(Qt::magenta));
+    ui->plotwidget->graph(12)->setPen(p);
+    ui->plotwidget->graph(12)->setAntialiasedFill(false);
+    ui->plotwidget->graph(12)->setLineStyle(QCPGraph::lsLine);
+}
+
+void MainWindow::on_pushButton_6_clicked() // Запуск графиков
+{
+    if(DTconnected)
+    {
+        if(tconnect->isActive()) tconnect->stop();
+        ui->plotwidget->yAxis->setRange(0, 100);
+        QEventLoop loop;
+        PlotThread *p = new PlotThread();
+        QObject::connect(p, SIGNAL(finished()), &loop, SLOT(quit()));
+        QObject::connect(p, SIGNAL(sendData(QStringList, QStringList, double)),
+                         SLOT(GetPlotData(QStringList, QStringList, double)));
+        p->start();
+        loop.exec();
+    }
+}
+
+void MainWindow::GetPlotData(QStringList temp, QStringList cur, double time)
+{
+    qDebug() << QString::number(time, 'f', 2).toDouble();
+    for(int i=0; i<6; i++)
+    {
+        ui->plotwidget->graph(i)->addData(QString::number(time, 'f', 2).toDouble(),
+                                          QString::number(temp[i].toDouble()/100, 'f', 2).toDouble());
+    }
+    for(int i=7; i<13; i++)
+    {
+        ui->plotwidget->graph(i)->addData(QString::number(time, 'f', 2).toDouble(),
+                                          cur[i].toInt());
+    }
+    if(!isScaled) ui->plotwidget->xAxis->rescale();
+    ui->plotwidget->replot();
+}
+
+void MainWindow::mousePress(QMouseEvent *e) // Масштабирование графика
+{
+    if(e->button() == Qt::LeftButton)
+    {
+         p1 = e->pos();
+         origin = e->pos();
+         if (!rubberBand)
+         {
+             rubberBand = new QRubberBand(QRubberBand::Rectangle, ui->plotwidget);
+         }
+         rubberBand->setGeometry(QRect(origin, QSize()));
+         rubberBand->show();
+    }
+    if(e->button() == Qt::RightButton)
+    {
+        QToolTip::showText(e->globalPos(),
+                               QString::number(ui->plotwidget->yAxis->pixelToCoord(e->pos().y()), 'f', 2)+
+                               " °C", this, rect() );
+        QWidget::mousePressEvent(e);
+    }
+    if(e->button() == Qt::MidButton)
+    {
+        if(rubberBand->isHidden())
+        {
+            p1 = e->pos();
+            m3pressed = true;
+        }
+    }
+}
+
+void MainWindow::mouseRelease(QMouseEvent *e)
+{
+    if(rubberBand)
+    {
+        if (e->button() == Qt::LeftButton)
+        {
+            p2 = e->pos();
+            double w = (p2.x()-p1.x());
+            double h = (p2.y()-p1.y());
+            if(w>10 && h>10)
+            {
+                isScaled = true;
+                double deltax = 0.0;
+                double deltay = 0.0;
+                deltax = w/ui->plotwidget->axisRect()->width();
+                deltay = h/ui->plotwidget->axisRect()->height();
+                ui->plotwidget->axisRect()->zoomEvent(deltax, deltay, QPoint((p1.x()+p2.x())/2.0,(p1.y()+p2.y())/2.0));
+            }
+            if(w<-10 && (h<-10 || h>10))
+            {
+                ui->plotwidget->xAxis->rescale();
+                ui->plotwidget->yAxis->setRange(0, 100);
+                ui->plotwidget->replot();
+                isScaled = false;
+            }
+            rubberBand->hide();
+        }
+    }
+    if(e->button() == Qt::MidButton)
+        m3pressed = false;
+}
+
+void MainWindow::mouseMove(QMouseEvent *e)
+{
+    if(rubberBand)
+        rubberBand->setGeometry(QRect(origin, e->pos()).normalized());
+    if(isScaled)
+        if(m3pressed)
+        {
+            pc = e->pos();
+            ui->plotwidget->xAxis->moveRange(ui->plotwidget->xAxis->pixelToCoord(p1.x())-
+                                             ui->plotwidget->xAxis->pixelToCoord(pc.x()));
+            ui->plotwidget->yAxis->moveRange(ui->plotwidget->yAxis->pixelToCoord(p1.y())-
+                                             ui->plotwidget->yAxis->pixelToCoord(pc.y()));
+            ui->plotwidget->replot();
+            p1 = e->pos();
+        }
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

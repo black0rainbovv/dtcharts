@@ -1,0 +1,21 @@
+<RCC>
+    <qresource prefix="/Res">
+        <file>Res/arrow.png</file>
+        <file>Res/loading.gif</file>
+        <file>Res/term.png</file>
+        <file>Res/clear-all.png</file>
+        <file>Res/arClosed.png</file>
+        <file>Res/arOpen.png</file>
+        <file>Res/sync.png</file>
+        <file>Res/driver.gif</file>
+        <file>Res/protocol.png</file>
+        <file>Res/ProtocolW.png</file>
+        <file>Res/save-icon.png</file>
+        <file>Res/open-icon.png</file>
+        <file>Res/alarm.mp3</file>
+        <file>Res/alarm_short.mp3</file>
+        <file>Res/image.ico</file>
+        <file>Res/minus.png</file>
+        <file>Res/plus.png</file>
+    </qresource>
+</RCC>
